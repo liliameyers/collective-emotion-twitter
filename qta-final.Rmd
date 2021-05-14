@@ -1,0 +1,781 @@
+---
+title: "Quantitative Text Analysis Final"
+author: "Candidate 13343"
+date: "May 4, 2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r, message=FALSE}
+library(quanteda)
+library(dplyr)
+library(stringr)
+library(topicmodels)
+library(quanteda)
+library(quanteda.dictionaries)
+library(quanteda.sentiment)
+library(quanteda.textstats)
+library(cvTools)
+library(reshape)
+library(ggplot2)
+library(httr)
+library(jsonlite)
+library(devtools)
+library(academictwitteR)
+library(tidyr)
+library(topicmodels)
+library(topicdoc)
+library(ldatuning)
+library(LSX)
+library(grid)
+library(scales)
+library(lubridate)
+library(kableExtra)
+library(tidytext)
+```
+
+# API query tables 
+
+```{r, eval=TRUE}
+# search query table
+data.frame("Query_parameter" = c("Keywords: Hashtags",
+                                 "Location",
+                                 "Language",
+                                 "Start date",
+                                 "End date"),
+           "Type" = c("string",
+                      "numeric",
+                      "string", 
+                      "date",
+                      "date"),
+           "Value" = c("#ForLondon, #TurnToLove, #LoveWillWin, #ISISWillLose, #LondonBridge, #LondonAttacks, #BoroughMarket, #ISISWillLose",
+                       "Tweet location: UK",
+                       "English", "June 3, 2017 20:45:59 UTC",
+                       "June 13, 2017 23:59:59 UTC")) %>%  wc()
+  kbl(booktabs = T, 
+      caption = "Twitter API query request parameters",
+      col.names = c("Query parameter", "Type", "Value")) %>% 
+  kable_styling(latex_options =  c("striped"),
+                font_size = 11,
+                full_width = FALSE) %>% 
+  column_spec(3, width = "8cm")
+```
+
+```{r, eval=TRUE}
+# results table
+data.frame("Response_field" = c("id",
+                                "text",
+                                "author_id",
+                                "created_at"),
+           "Type" = c("numeric",
+                      "string",
+                      "numeric",
+                      "date"),
+           "Value_description" = c("Unique number identifying each tweet retrieved",
+                                   "Content of the tweet as a string with 140 character limit",
+                                   "Unique number identifying each user",
+                                   "Timstamp for when tweet was published")) %>% 
+  kbl(booktabs = T,
+      caption = "Twitter API Response fields",
+      col.names = c("Response field", "Type", "Value description")) %>% 
+  kable_styling(latex_options =  c("striped"),
+                font_size = 11,
+                full_width = FALSE)
+```
+
+# Twitter API query
+
+```{r, eval=FALSE}
+# (removed bearer token after using)
+bearer_token <- "" 
+
+# enter query parameters
+query_search <- '(#ForLondon OR #TurnToLove OR #LoveWillWin OR #LondonBridge OR #LondonAttacks OR #BoroughMarket OR #ISISWillLose) lang:en place_country:GB'
+
+# store query output
+query_output <- get_all_tweets(query_search, "2017-06-03T20:45:00Z", "2017-06-13T23:59:59Z", bearer_token, data_path = "data_test4/")
+
+# save output as RDS object
+saveRDS(query_output, "london_tweets.RDS")
+```
+
+```{r, eval=FALSE}
+# read in data file
+london_tweets <- readRDS("london_tweets.RDS")
+
+# get distinct rows
+london_tweets <- london_tweets %>% distinct(id, .keep_all = TRUE)
+
+# get length of each tweet 
+london_tweets$n_words <- ntoken(london_tweets$text)
+```
+
+# Distribution of word count over tweets
+
+```{r, eval=FALSE}
+# distribution of word cout over twees
+wordcount_hist <- london_tweets %>%
+  ggplot(aes(x = n_words)) +
+  geom_histogram(bins = 30, color = "grey") +
+  labs(title = "Number of words per tweet",
+       x = "Tweet length (number of words)",
+       y = "Frequency") +
+  theme_bw() + 
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = 0.5),
+        plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm"))
+
+# save as .png file
+ggsave(wordcount_hist, file = "wordcount_hist.png", height = 5.5, width = 7)
+```
+
+# Cleaning the data
+
+```{r, eval=FALSE}
+# create corpus of all tweets
+tweet_corpus <- corpus(london_tweets, text = "text")
+
+# create dfm, no stemming
+tweet_dfm <- tweet_corpus %>%
+  # remove numbers and punctution
+  tokens(remove_punct = TRUE,
+         remove_numbers = TRUE) %>% 
+  # remove stopwords, common twitter phrases, 
+  tokens_remove(c(stopwords("en"),
+                  "t.co", "rt", "amp", "http", "https") 
+                # include padding for removal of stopwords and n-grams if wanted
+                # padding = TRUE
+                ) %>% 
+  # if wanting to select n-grams or exclude words less than 2 characters 
+  # tokens_select(min_nchar = 2L) %>% 
+  # tokens_ngrams(n = 1:2) %>% 
+  dfm(remove_symbols = TRUE,
+      remove_url = TRUE,
+      stem = FALSE,
+      verbose = TRUE)
+
+saveRDS(tweet_corpus, "tweet_corpus.RDS")
+saveRDS(tweet_dfm, "tweet_dfm.RDS")
+```
+
+```{r, eval=FALSE}
+# store docvars
+tweets_docvars <- docvars(tweet_dfm)
+
+# get created at in datetime format date and hour
+tweets_docvars <- tweets_docvars %>% 
+  mutate(created_ymdh = ymd_h(paste(substr(created_at, 1, 10), 
+                                    substr(created_at, 12, 13)))) %>% 
+  mutate(created_ymd = ymd(substr(created_at, 1, 10)))
+
+# store as new docvars
+docvars(tweet_dfm, "datetime_created") <- tweets_docvars$created_ymdh
+docvars(tweet_dfm, "date_created") <- tweets_docvars$created_ymd
+```
+
+```{r, eval=FALSE}
+# created stemmed dfm for parts of the analysis
+tweet_dfm_stem <- dfm(tweet_dfm, 
+                      stem = TRUE, 
+                      verbose = TRUE)
+
+# create dfm without query hashtags for part of analysis
+tweet_dfm_no_ht <- tweet_dfm %>% 
+  dfm_remove(c("#ForLondon", "#TurnToLove", "#LoveWillWin",
+               "#LondonBridge", "#LondonAttacks", "#BoroughMarket",
+               "#ISISWillLose"))
+
+# create stemmed dfm without query hashtags for part of analysis
+tweet_dfm_no_ht_stem <- dfm(tweet_dfm_no_ht, 
+                            stem = TRUE, 
+                            verbose = TRUE)
+```
+
+# Descriptive statistics 
+
+## Most frequent words aside from words used to query
+
+```{r fig.width=7, fig.height=4.75, eval=FALSE}
+# inspect top 20 most frequent words 
+# used source below for help: 
+# https://tutorials.quanteda.io/statistical-analysis/frequency/
+# quanteda.io/articles/pkgdown/replication/digital-humanities.html
+# quanteda.io/articles/pkgdown/examples/plotting.html
+top_terms_plot <- textstat_frequency(tweet_dfm_no_ht_stem, n = 10) %>% 
+  ggplot(aes(x = reorder(feature, -rank), y = frequency)) +
+  geom_point() +
+  coord_flip() + 
+  labs(title = "Most frequent words excluding query values",
+       caption = "Source: Twitter API",
+       x = "Term",
+       y = "Frequency") +
+  theme_bw() + 
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = 0.5),
+        plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm"))
+
+# save as .png file
+ggsave(top_terms_plot, file = "top_terms_plot.png", height = 4.5, width = 7)
+```
+
+# Most frequent hashtags
+
+```{r fig.width=7, fig.height=4.75, eval=FALSE}
+# used source below for help: 
+# https://tutorials.quanteda.io/statistical-analysis/frequency/
+# most popular hashtags
+ht_dfm <- dfm_select(tweet_dfm,
+                     pattern = "#*")
+
+top_ht_plot <- textstat_frequency(ht_dfm, n = 10) %>% 
+  ggplot(aes(x = reorder(feature, -rank), y = frequency)) +
+  geom_point() +
+  coord_flip() + 
+  labs(title = "Most frequent hastags including query values",
+       caption = "Source: Twitter API",
+       x = "Term",
+       y = "Frequency") +
+  theme_bw() + 
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = 0.5),
+        plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm"))
+
+# save as .png file
+ggsave(top_ht_plot, file = "top_ht_plot.png", height = 4.5, width = 7)
+```
+
+# Most frequent mentions
+
+```{r fig.width=7, fig.height=4.5, eval=FALSE}
+# most popular usernames
+# code from: https://quanteda.io/articles/pkgdown/examples/twitter.html
+users_dfm <- dfm_select(tweet_dfm,
+                       pattern = "@*")
+
+top_users_plot <- textstat_frequency(users_dfm, n = 10) %>% 
+  ggplot(aes(x = reorder(feature, -rank), y = frequency)) +
+  geom_point() +
+  coord_flip() + 
+  labs(title = "Most frequent users mentioned",
+       caption = "Source: Twitter API",
+       x = "Term",
+       y = "Frequency") +
+  theme_bw() + 
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = 0.5),
+        plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm"))
+
+# save as .png file
+ggsave(top_users_plot, file = "top_users_plot.png", height = 4.5, width = 7)
+```
+
+## Number of tweets per day
+
+```{r fig.width=7, fig.height=5, eval=FALSE}
+# look at number of tweets per day
+tweets_per_day_plot <- tweets_docvars %>% 
+  group_by(created_ymd) %>% 
+  summarise(num_tweets = n()) %>% 
+  ggplot(aes(x = created_ymd, y = num_tweets)) +
+  geom_line() +
+  # adjust to relative align with plot above
+  scale_x_date(limits = c(as.Date("2017-06-03"), as.Date("2017-06-13")),
+               date_breaks = "1 day",  
+               labels = date_format("%b %d")
+               ) +
+  # adjust labels 
+  labs(title = "Number of tweets per day after the London Bridge attack",
+       subtitle = "All UK geolocated and English tweets",
+       caption = "Source: Twitter API",
+       x = "Date",
+       y = "Number of tweets") +
+  theme_bw() +
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm"))
+
+# save as .png file
+ggsave(tweets_per_day_plot, file = "tweets_per_day_plot.png", height = 5, width = 7)
+```
+
+## Feature frequencies of original and cleaned data
+
+```{r, eval=FALSE}
+# average number of words per speech 
+dfm_raw_df_summ <- as.data.frame(textstat_summary(tweet_corpus_lower))
+
+dfm_clean_df_summ <- as.data.frame(textstat_summary(tweet_dfm_stem))
+
+description_tab <- rbind("original_corpus" = colMeans(dfm_raw_df_summ[4:11], na.rm = TRUE),
+                         "processed_dfm" = colMeans(dfm_clean_df_summ[4:11], na.rm = TRUE)) 
+
+saveRDS(description_tab, "description_tab.RDS")  
+```
+
+```{r, eval=TRUE}
+description_tab <- readRDS("description_tab.RDS")
+
+rownames(description_tab) <- c("Original corpus", "Processed dfm")
+
+description_tab[,-8] %>%
+  kbl(booktabs = T, caption = "Feature frequencies") %>% 
+  kable_styling(latex_options =  c("hold_position", "striped"),
+                full_width = FALSE)
+```
+
+# Topic modelling
+
+## Clean dfm more 
+
+```{r, eval=FALSE}
+# trim dfm of post_text to have min doc frequency of 3
+tweet_dfm_trim <- dfm_trim(tweet_dfm_stem,
+                           min_termfreq = 2,
+                           verbose = TRUE)
+
+# look at most popular terms that are likely to appear in many topics
+sort(colSums(tweet_dfm_trim), decreasing = TRUE)[1:20]
+
+# save the top 6 terms likely to show in many topics
+pop_terms <- names(sort(colSums(tweet_dfm_trim), decreasing = TRUE)[1:6])
+
+# remove the top 10 terms
+tweet_dfm_lda <- dfm_select(tweet_dfm_trim, 
+                            pattern = pop_terms,
+                            selection = "remove")
+```
+
+```{r, eval=FALSE}
+# look at most popular terms again
+sort(colSums(tweet_dfm_lda), decreasing = TRUE)[1:20]
+
+# remove rows with 0
+tweet_dfm_lda <- tweet_dfm_lda[(rowSums(tweet_dfm_lda) != 0),]
+```
+
+## Selecting optimal number of topics: 
+Code by Pablo Barbera from: https://github.com/pablobarbera/eui-text-workshop/blob/master/03-unsupervised/01-topic-models.Rmd
+
+```{r, eval=FALSE}
+# convert to dtm object
+dtm <- convert(tweet_dfm_lda, to = "topicmodels")
+
+# create cross-validated LDA function
+cvLDA <- function(Ntopics, dtm, K = 10) {
+  
+  folds <- cvFolds(nrow(dtm), K, 1)
+  perplex <- rep(NA, K)
+  llk <- rep(NA, K)
+  
+  for(i in unique(folds$which)){
+    cat(i, " ")
+    which.test <- folds$subsets[folds$which == i]
+    which.train <- {1:nrow(dtm)}[-which.test]
+    dtm.train <- dtm[which.train,]
+    dtm.test <- dtm[which.test,]
+
+    lda.fit <- LDA(dtm.train, k = Ntopics, method = "Gibbs",
+                   control = list(verbose = 50L, iter = 100))
+    perplex[i] <- perplexity(lda.fit,dtm.test)
+    llk[i] <- logLik(lda.fit)
+  }
+  return(list(K = Ntopics,
+              perplexity = perplex,
+              logLik = llk))
+}
+```
+
+## Apply function to between K = 2 and K = 20 
+
+```{r, eval=FALSE}
+K <- c(2:20)
+results <- list()
+i = 1
+
+for (k in K){
+    # cat("\n\n\n##########\n ", k, "topics", "\n")
+    res <- cvLDA(k, dtm)
+    results[[i]] <- res
+    i = i + 1
+}
+
+saveRDS(results, "cvLDA_results.RDS")
+```
+
+## Plot cross-validated perplexity and log likelihood 
+
+```{r fig.width=7, fig.height=5.5, eval=FALSE}
+## plot
+df_all <- data.frame(
+  k = rep(K, each = 10),
+  perp =  unlist(lapply(results, '[[', 'perplexity')),
+  loglk = unlist(lapply(results, '[[', 'logLik')),
+  stringsAsFactors = F)
+
+# filter to only odd number of topics
+df <- df_all %>% 
+  filter(k %in% seq(2, 20, 2))
+
+min(df$perp)
+
+df$ratio_perp <- df$perp / max(df$perp)
+df$ratio_lk <- df$loglk / min(df$loglk)
+
+df <- data.frame(cbind(
+  aggregate(df$ratio_perp, by = list(df$k), FUN = mean),
+  aggregate(df$ratio_perp, by = list(df$k), FUN = sd)$x,
+  aggregate(df$ratio_lk, by = list(df$k), FUN = mean)$x,
+  aggregate(df$ratio_lk, by = list(df$k), FUN = sd)$x),
+  stringsAsFactors = F)
+
+names(df) <- c("k", "ratio_perp", "sd_perp", "ratio_lk", "sd_lk")
+pd <- melt(df[,c("k","ratio_perp", "ratio_lk")], id.vars = "k")
+pd2 <- melt(df[,c("k","sd_perp", "sd_lk")], id.vars = "k")
+pd$sd <- pd2$value
+levels(pd$variable) <- c("Perplexity", "LogLikelihood")
+
+p <- ggplot(pd, aes(x = k, y = value, linetype = variable))
+
+pq <- p + geom_line() + 
+  geom_point(aes(shape = variable), 
+             fill = "white", shape = 21, size = 1.40) +
+  geom_errorbar(aes(ymax = value + sd, ymin = value-sd), width = 1.5) +
+  scale_y_continuous("Ratio with respect to worst value") +
+  scale_x_continuous("Number of topics", 
+                     breaks = seq(2, 20, 2)) +
+  # adjust labels 
+  labs(title = "Cross-validated model fit across values of K",
+       caption = "Code source: https://github.com/pablobarbera/eui-text-workshop/") +
+  theme_bw() +
+  theme(legend.position = "right",
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm"))
+
+# save as .png file
+ggsave(pq, file = "pq.png", height = 5.5, width = 7.25)
+```
+
+## Test different values of K
+
+```{r, eval=FALSE}
+set.seed(123)
+
+lda_list <- list()
+k_vals <- c(5:15)
+
+for (i in 1:length(k_vals)) {
+  
+  set.seed(123)
+  tweet_lda <- LDA(tweet_dfm_lda,
+                   k = k_vals[i],
+                   method = "Gibbs", 
+                   control = list(seed = 1))
+  lda_list[[i]] <- tweet_lda
+  
+  print(i)
+}
+saveRDS(lda_list, "lda_list.RDS")
+```
+
+## Save model with K = 11
+
+```{r, eval=FALSE}
+tm_11 <- lda_list[[7]]
+
+# create topic data frame and topic labels
+get_terms(tm_11, 20)
+
+topic_df <- data.frame(topic = c("topic1", "topic2", "topic3", "topic4",
+                                 "topic5", "topic6", "topic7", "topic8",
+                                 "topic9", "topic10", "topic11"),
+                       topic_label = c("Safety", "Other", "Politics",
+                                       "Unity", "Emergency response", "Shock and sadness",
+                                       "Support and sympathy", "Terrorism and religion",
+                                       "Taking action", "Thoughts and prayers", "News and event description"))
+
+
+# get assigned topic of each tweet 
+docvars(tweet_dfm_lda, "est_topic_num") <- topics(tm_11)
+
+saveRDS(tm_11, "tm_11.RDS")
+```
+
+## Print table of topics
+
+```{r eval=FALSE}
+topic_model_11 <- readRDS("tm_11.RDS")
+
+# get top terms
+top_terms_mat <- get_terms(topic_model_11, 20)
+
+# update emojis to word description for printing
+top_terms_mat[2,7] <- "emoji: uk_flag"
+top_terms_mat[13,1] <- "emoji: prayer_hands1"
+top_terms_mat[15,1] <- "emoji: prayer_hands2"
+
+# paste top terms into one comma separated string
+top_terms <- c()
+
+for(i in 1:11) {
+  
+  top_terms[i] <- paste(top_terms_mat[, i], collapse=", ")
+  
+}
+
+# add topic labels again
+topic_tab <- data.frame(topic = c(1:11),
+                        terms = top_terms,
+                        topic_label = c("Safety", "Other", "Politics",
+                                        "Unity", "Emergency response", "Shock & sadness",
+                                        "Support & sympathy", "Terrorism & religion",
+                                        "Taking action", "Thoughts & prayers", "News & event description")) 
+
+saveRDS(topic_tab, "topic_tab.RDS")
+```
+
+```{r eval=TRUE}
+topic_tab <- readRDS("topic_tab.RDS")
+
+topic_tab %>%
+  as.data.frame() %>% 
+  kbl(booktabs = T, 
+      caption = "Estimated topic labels and their terms",
+      col.names = c("Topic", "Terms", "Topic Label")) %>% 
+  kable_styling(latex_options =  c("striped"),
+                full_width = FALSE) %>% 
+  column_spec(2, width = "12cm")
+```
+
+## Share of topics over time
+
+```{r eval=FALSE}
+tweet_texts <- london_tweets %>% select(id, text)
+
+tweet_lda_df <- docvars(tweet_dfm_lda) %>% 
+  select(id, datetime_created, 
+         date_created, est_topic_num) %>% 
+  left_join(tweet_texts, by = "id")
+
+# to see sample of tweet from topic
+tweet_lda_df %>% filter(est_topic_num == 1) %>% select(text) %>% head()
+```
+
+```{r fig.width=6.5, fig.height=9, message=FALSE, warning=FALSE, eval=FALSE}
+posterior_topic <- posterior(tm_11)
+beta_matrix <- posterior_topic[["terms"]]
+theta_matrix <- posterior_topic[["topics"]]
+
+# Add probability to df 
+tweet_lda_df$topic1 <- theta_matrix[, 1] 
+tweet_lda_df$topic2 <- theta_matrix[, 2] 
+tweet_lda_df$topic3 <- theta_matrix[, 3] 
+tweet_lda_df$topic4 <- theta_matrix[, 4] 
+tweet_lda_df$topic5 <- theta_matrix[, 5] 
+tweet_lda_df$topic6 <- theta_matrix[, 6] 
+tweet_lda_df$topic7 <- theta_matrix[, 7] 
+tweet_lda_df$topic8 <- theta_matrix[, 8] 
+tweet_lda_df$topic9 <- theta_matrix[, 9] 
+tweet_lda_df$topic10 <- theta_matrix[, 10] 
+tweet_lda_df$topic11 <- theta_matrix[, 11] 
+
+# pivot the data frame
+tweet_lda_df <- tweet_lda_df %>% 
+  pivot_longer(cols = colnames(tweet_lda_df)[6:length(colnames(tweet_lda_df))],
+                      names_to = "topic_prob", values_to = "probability") %>% 
+  # add topic column labels
+  left_join(topic_df, by = c("topic_prob" = "topic"))
+```
+
+```{r fig.width=6.5, fig.height=9, message=FALSE, warning=FALSE, eval=FALSE}
+# look at topic share over time
+lda_plot <- tweet_lda_df %>% 
+  filter(topic_label != "Other") %>% 
+  group_by(topic_label, datetime_created) %>% 
+  summarise(mean_prob = mean(probability)) %>% 
+  filter(datetime_created < as.Date("2017-06-07")) %>% 
+  ggplot(aes(x = datetime_created, y = mean_prob)) +
+  geom_line() +
+  # adjust to relative align with plot above
+  # scale_x_date(labels = date_format("%b %d")) +
+  # adjust labels 
+  labs(title = "Estimated proportion of hourly tweets about each topic",
+       caption = "Source: Twitter API",
+       x = "Date",
+       y = "Average probability of tweet about topic") +
+  theme_bw() +
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm")) +
+  # facet by year
+  facet_wrap( ~ topic_label, 
+             nrow = 5,
+             ncol = 2)
+
+# save as .png file
+ggsave(lda_plot, file = "lda_plot.png", height = 9, width = 6.5)
+```
+
+# Sentiment analysis
+
+```{r, eval=FALSE}
+# not normalizing for document length
+# using unstemmed DFM
+# dfm_wght <- dfm_weight(tweet_dfm, scheme = "prop")
+
+# build the sentiment dictionaries of just 
+# the positive and negative categories R
+# from NRC dictionary
+NRC_sent_dict <- dictionary(list(positive = data_dictionary_NRC[["positive"]],
+                                 negative = data_dictionary_NRC[["negative"]]))
+```
+
+```{r eval=FALSE}
+tweet_dfm <- readRDS("tweet_dfm.RDS") 
+
+# apply emotion dictonary to the dfms
+(dfm_sent_NRC_wght <- dfm_lookup(dfm_wght,
+                                 dictionary = data_dictionary_NRC))
+
+(dfm_sent_NRC <- dfm_lookup(tweet_dfm,
+                            dictionary = data_dictionary_NRC))
+
+# get share of positive and negative emotions over time
+NRC_tbl <- dfm_sent_NRC %>% 
+  dfm_group(groups = "datetime_created") %>% 
+  convert(to = "data.frame") %>% 
+  mutate(datetime = unique(docvars(dfm_sent_NRC, "datetime_created"))) %>% 
+  filter(datetime < as.Date("2017-06-06")) %>% 
+  select(-c(doc_id)) %>% 
+  pivot_longer(cols = colnames(dfm_sent_NRC)[1:length(colnames(dfm_sent_NRC))],
+               names_to = "emotion", values_to = "count") %>% 
+  filter(emotion != "positive") %>% 
+  filter(emotion != "negative")  
+  
+total_count <- NRC_tbl %>% 
+  group_by(datetime) %>% 
+  summarise(total_count = sum(count))
+
+NRC_plot <- NRC_tbl %>% 
+  left_join(total_count, by = "datetime") %>% 
+  mutate(percentage = count/total_count) %>% 
+  select(datetime, emotion, percentage) %>% 
+  mutate(roll_per = rollmean(percentage, 3, fill = NA))
+
+NRC_neg <- NRC_plot %>% 
+  filter(emotion %in% c("anger", "disgust", "fear", "sadness"))
+
+NRC_pos <- NRC_plot %>% 
+  filter(emotion %in% c("anticipation", "joy", "surprise", "trust"))
+```
+
+## Share of negative emotions over time
+
+```{r eval=FALSE}
+NRC_neg_plot <- NRC_neg %>% 
+  ggplot(aes(x = datetime,
+             y = percentage, 
+             group = emotion)) +
+  geom_line(aes(colour = emotion)) +
+  # adjust labels
+  labs(title = "Share of emotions over time",
+       subtitle = "NRC emotion dictionary",
+       x = "Date",
+       y = "Percentage share") +
+  # adjust theme elements
+  theme_bw() +
+  theme(axis.title.x = element_text(margin = margin(10, 0, 0, 0)),
+        axis.title.y = element_text(margin = margin(0, 10, 0, 0)),
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        plot.margin = unit(c(0.25, 0.5, 0.25, 0.5), "cm"))
+
+# save as .png file
+ggsave(NRC_neg_plot, file = "NRC_neg.png", height = 5.5, width = 7.25)
+```
+
+## Share of positive emotions over time
+
+```{r eval=FALSE}
+NRC_pos_plot <- NRC_pos %>% 
+  ggplot(aes(x = datetime,
+             y = percentage, 
+             group = emotion)) +
+  geom_line(aes(colour = emotion)) +
+  # adjust labels
+  labs(title = "Share of emotions over time",
+       subtitle = "NRC emotion dictionary",
+       x = "Date",
+       y = "Percentage share") +
+  # adjust theme elements
+  theme_bw() +
+  theme(axis.title.x = element_text(margin = margin(10, 0, 0, 0)),
+        axis.title.y = element_text(margin = margin(0, 10, 0, 0)),
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        plot.margin = unit(c(0.25, 0.5, 0.25, 0.5), "cm"))
+
+# save as .png file
+ggsave(NRC_pos_plot, file = "NRC_pos.png", height = 5.5, width = 7.25)
+
+NRC_neg %>% arrange(desc(percentage))
+
+london_tweets %>% filter(created_at)
+
+dfm_subset(tweet_dfm, datetime_created < as.Date("2017-06-05 20:00:00")) 
+
+           
+london_tweets$time <- as.Date(docvars(tweet_dfm, "datetime_created"))
+
+london_tweets %>% filter(hour > as.Date("2017-06-05")) %>% View()
+london_tweets %>% filter(id == 871811917249204225)
+```
+
+## Overall sentiment score over time
+
+```{r, eval=FALSE}
+(dfm_sent_NRC <- dfm_lookup(tweet_dfm,
+                            dictionary = NRC_sent_dict))
+
+# get sentiment scores 
+sent_scores <- as.vector((dfm_sent_NRC[,1] - dfm_sent_NRC[,2])) * 100
+pos_score  <- as.vector((dfm_sent_NRC[,1])) * 100
+neg_score <- as.vector((dfm_sent_NRC[,2])) * 100
+
+# create data frame of date time and sentiment scores 
+sent_df <- data.frame(datetime = docvars(dfm_sent_NRC, "datetime_created"),
+                      sentiment_score = sent_scores) 
+plot_df <- sent_df %>% 
+  group_by(datetime) %>% 
+  summarise(mean_score = mean(sentiment_score)) %>% 
+  filter(datetime < as.Date("2017-06-06")) 
+
+
+sent_plot <- plot_df %>% 
+  ggplot(aes(x = datetime,
+             y = mean_score)) +
+  geom_line() + 
+    # adjust labels
+  labs(title = "Sentiment score over time",
+       subtitle = "NRC sentiment dictionary",
+       x = "Date",
+       y = "Average hourly sentiment score") +
+  # adjust theme elements
+  theme_bw() +
+  theme(axis.title.x = element_text(margin = margin(10, 0, 0, 0)),
+        axis.title.y = element_text(margin = margin(0, 10, 0, 0)),
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        plot.margin = unit(c(0.25, 0.5, 0.25, 0.5), "cm"))
+
+# save as .png file
+ggsave(sent_plot, file = "sent_plot.png", height = 5.5, width = 7.25)
+```
+
