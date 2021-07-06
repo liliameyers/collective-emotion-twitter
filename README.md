@@ -1,6 +1,6 @@
 # qta-final
 
-Code for final report for Quantitative Text Analysis at LSE
+Code for final report for Quantitative Text Analysis course
 
 ## Contents
 
