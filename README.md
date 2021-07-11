@@ -1,8 +1,7 @@
 # qta-final
 
-Report and code analysing tweets after the 2017 London Bridge attack
-
-> Submitted as an assignment for Quantiative Text Analysis course
+* Report and code analysing tweets after the 2017 London Bridge attack
+* Submitted as an assignment for Quantiative Text Analysis course
 
 ## Contents
 
